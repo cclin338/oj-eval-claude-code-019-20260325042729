@@ -39,10 +39,9 @@ void Calculate(std::vector<Matrix *> keys, std::vector<Matrix *> values,
       V_all = temp;
     }
 
-    // Step 3: Move matrices to SRAM for computation
+    // Step 3: Move Q and K_all to SRAM for computation (keep V_all in HBM for now)
     gpu_sim.MoveMatrixToSharedMem(current_query);
     gpu_sim.MoveMatrixToSharedMem(K_all);
-    gpu_sim.MoveMatrixToSharedMem(V_all);
 
     // Step 4: Transpose K_all in SRAM
     Matrix* K_transpose = matrix_memory_allocator.Allocate("K_transpose_" + std::to_string(i));
@@ -53,11 +52,17 @@ void Calculate(std::vector<Matrix *> keys, std::vector<Matrix *> values,
     Matrix* QKt = matrix_memory_allocator.Allocate("QKt_" + std::to_string(i));
     gpu_sim.MatMul(current_query, K_transpose, QKt);
 
-    // Step 6: Compute exp(Q * K^T)
+    // Step 6: Release K_transpose early to save SRAM
+    gpu_sim.ReleaseMatrix(K_transpose);
+
+    // Step 7: Compute exp(Q * K^T)
     Matrix* exp_QKt = matrix_memory_allocator.Allocate("exp_QKt_" + std::to_string(i));
     gpu_sim.MatExp(QKt, exp_QKt);
 
-    // Step 7: Compute softmax row by row
+    // Step 8: Release QKt early
+    gpu_sim.ReleaseMatrix(QKt);
+
+    // Step 9: Compute softmax row by row
     // exp_QKt has shape (i+1) x (i+1)
     size_t n = i + 1; // Matrix dimension for this round
 
@@ -96,11 +101,20 @@ void Calculate(std::vector<Matrix *> keys, std::vector<Matrix *> values,
       gpu_sim.ReleaseMatrix(row_sum);
     }
 
-    // Step 9: Compute softmax_result * V_all
+    // Step 10: Release exp_QKt
+    gpu_sim.ReleaseMatrix(exp_QKt);
+
+    // Step 11: Move V_all to SRAM for final multiplication
+    gpu_sim.MoveMatrixToSharedMem(V_all);
+
+    // Step 12: Compute softmax_result * V_all
     Matrix* final_result = matrix_memory_allocator.Allocate("final_" + std::to_string(i));
     gpu_sim.MatMul(softmax_result, V_all, final_result);
 
-    // Step 10: Move result to HBM
+    // Step 13: Release softmax_result to save SRAM
+    gpu_sim.ReleaseMatrix(softmax_result);
+
+    // Step 14: Move result to HBM
     gpu_sim.MoveMatrixToGpuHbm(final_result);
 
     // Run the simulator
@@ -112,10 +126,7 @@ void Calculate(std::vector<Matrix *> keys, std::vector<Matrix *> values,
     // Clean up (optional, as MatrixMemoryAllocator should handle it)
     gpu_sim.ReleaseMatrix(K_all);
     gpu_sim.ReleaseMatrix(V_all);
-    gpu_sim.ReleaseMatrix(K_transpose);
-    gpu_sim.ReleaseMatrix(QKt);
-    gpu_sim.ReleaseMatrix(exp_QKt);
-    gpu_sim.ReleaseMatrix(softmax_result);
+    // K_transpose, QKt, exp_QKt, softmax_result already released earlier
     // final_result will be released by rater.CommitAnswer
 
     /*********************  End of your code *********************/
